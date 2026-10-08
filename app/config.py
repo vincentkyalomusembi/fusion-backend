@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     database_url: str | None = None
     app_name: str = "Fusion Backend"
     api_v1_prefix: str = "/api/v1"
+    frontend_url: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
