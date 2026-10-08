@@ -6,6 +6,14 @@ class Settings(BaseSettings):
     app_name: str = "Fusion Backend"
     api_v1_prefix: str = "/api/v1"
     frontend_url: str | None = None
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
+    brevo_api_key: str | None = None
+    brevo_sender_email: str | None = None
+    brevo_sender_name: str = "Fusion Backend"
+    portfolio_upload_max_mb: int = 100
+    portfolio_batch_size: int = 250
+    portfolio_email_max_mb: int = 10
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
