@@ -10,21 +10,33 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db, engine
-from app.models.portfolio import Portfolio, PortfolioPreviewRecord
+from app.models.portfolio import Portfolio, PortfolioPreviewRecord, PortfolioResults
+from app.models.user import User
 from app.schemas.portfolio import (
+    ChatRequest,
+    ChatResponse,
+    ExplainResponse,
     PortfolioEmailRequest,
     PortfolioEmailResponse,
     PortfolioRead,
+    PortfolioResultsRead,
     PortfolioUploadRead,
     RecordEditBatch,
+    ReportRequest,
+    ReportResponse,
 )
+from app.services.auth_service import JWT_ALGORITHM, bearer_scheme, get_current_user
 from app.services.brevo_service import send_portfolio_csv
+from app.services.llm.action_recommender import recommend_actions
+from app.services.llm.client import chat as llm_chat
+from app.services.llm.result_explainer import explain_results
 from app.services.ml.predictor import predict_hazard_scores
 from app.services.portfolio_etl import (
     EXPOSURE_FIELDS,
@@ -35,6 +47,7 @@ from app.services.portfolio_etl import (
     process_portfolio,
     publish_portfolio,
 )
+from app.services.portfolio_results_service import compute_and_store_results
 
 router = APIRouter(prefix="/portfolios", tags=["portfolios"])
 UPLOAD_DIR = Path(tempfile.gettempdir()) / "fusion_portfolio_uploads"
@@ -53,11 +66,68 @@ def _get_portfolio(db: Session, portfolio_id: str, access_token: str) -> Portfol
     return portfolio
 
 
+def _optional_user_id(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> int | None:
+    """Extract user_id from JWT if present; return None if missing or invalid."""
+    if credentials is None or credentials.scheme.lower() != "bearer" or not settings.jwt_secret:
+        return None
+    try:
+        import jwt
+        payload = jwt.decode(credentials.credentials, settings.jwt_secret, algorithms=[JWT_ALGORITHM])
+        user_id = int(payload["sub"])
+        return user_id if db.get(User, user_id) is not None else None
+    except Exception:
+        return None
+
+
+def _get_results_or_compute(portfolio: Portfolio, db: Session) -> PortfolioResults:
+    existing = db.get(PortfolioResults, portfolio.id)
+    if existing is not None:
+        return existing
+    if portfolio.status not in {"predicted", "confirmed", *PREDICTABLE_STATUSES}:
+        raise HTTPException(status_code=409, detail="Run hazard prediction before viewing results")
+    try:
+        return compute_and_store_results(portfolio, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Results computation failed: {exc}") from exc
+
+
+# ── List (authenticated) ──────────────────────────────────────────────────────
+
+@router.get("", response_model=list[PortfolioRead])
+def list_portfolios(
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[Portfolio]:
+    """List all portfolios belonging to the signed-in user, newest first."""
+    try:
+        return list(
+            db.scalars(
+                select(Portfolio)
+                .where(Portfolio.user_id == current_user.id)
+                .order_by(Portfolio.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+            ).all()
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Unable to query portfolios") from exc
+
+
+# ── Upload ────────────────────────────────────────────────────────────────────
+
 @router.post("", response_model=PortfolioUploadRead, status_code=202)
 async def upload_portfolio(
     background_tasks: BackgroundTasks,
     name: str = Form(min_length=1, max_length=160),
     file: UploadFile = File(...),
+    user_id: int | None = Depends(_optional_user_id),
     db: Session = Depends(get_db),
 ) -> Portfolio:
     filename = Path(file.filename or "upload").name
@@ -93,6 +163,7 @@ async def upload_portfolio(
             status="queued",
             total_rows=0,
             dropped_rows=0,
+            user_id=user_id,
         )
         db.add(portfolio)
         db.commit()
@@ -116,6 +187,8 @@ async def upload_portfolio(
     finally:
         await file.close()
 
+
+# ── Status / preview / edit / predict / confirm / export / email ──────────────
 
 @router.get("/{portfolio_id}/status", response_model=PortfolioRead)
 def portfolio_status(
@@ -381,3 +454,105 @@ def email_portfolio_csv(
         raise HTTPException(status_code=502, detail="Brevo could not send the portfolio email") from exc
     finally:
         text_buffer.detach()
+
+
+# ── Results ───────────────────────────────────────────────────────────────────
+
+@router.get("/{portfolio_id}/results", response_model=PortfolioResultsRead)
+def get_portfolio_results(
+    portfolio_id: str,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> PortfolioResults:
+    """Return loss totals and exceedance curve. Computes and caches on first call."""
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    return _get_results_or_compute(portfolio, db)
+
+
+# ── AI features ───────────────────────────────────────────────────────────────
+
+@router.post("/{portfolio_id}/explain", response_model=ExplainResponse)
+def explain_portfolio(
+    portfolio_id: str,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> ExplainResponse:
+    """Generate a plain-language explanation of the portfolio's risk results."""
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    results = _get_results_or_compute(portfolio, db)
+    results_dict = {
+        "total_tiv_kes": results.total_tiv_kes,
+        "total_rows": results.total_rows,
+        "eal_common_kes": results.eal_common_kes,
+        "eal_occasional_kes": results.eal_occasional_kes,
+        "eal_moderate_kes": results.eal_moderate_kes,
+        "eal_severe_kes": results.eal_severe_kes,
+        "eal_extreme_kes": results.eal_extreme_kes,
+        "eal_total_kes": results.eal_total_kes,
+        "exceedance_curve": results.exceedance_curve,
+        "top_locations": results.top_locations,
+    }
+    try:
+        explanation = explain_results(portfolio.name, results_dict)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ExplainResponse(explanation=explanation)
+
+
+@router.post("/{portfolio_id}/chat", response_model=ChatResponse)
+def chat_portfolio(
+    portfolio_id: str,
+    request: ChatRequest,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> ChatResponse:
+    """Answer questions about the portfolio using its results as context."""
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    results = _get_results_or_compute(portfolio, db)
+
+    system = (
+        f"You are a flood risk analyst assistant for the portfolio '{portfolio.name}'. "
+        f"Total Insured Value: KES {results.total_tiv_kes:,.0f}. "
+        f"Expected Annual Loss: KES {results.eal_total_kes:,.0f}. "
+        f"Locations: {results.total_rows}. "
+        "Answer questions concisely using only the data provided. "
+        "Do not invent figures."
+    )
+    messages = [{"role": "system", "content": system}] + [
+        {"role": m.role, "content": m.content} for m in request.messages
+    ]
+    try:
+        reply = llm_chat(messages, max_tokens=512)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ChatResponse(reply=reply)
+
+
+@router.put("/{portfolio_id}/report", response_model=ReportResponse)
+def generate_report(
+    portfolio_id: str,
+    request: ReportRequest,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> ReportResponse:
+    """Generate a full narrative report and action recommendations."""
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    results = _get_results_or_compute(portfolio, db)
+    results_dict = {
+        "total_tiv_kes": results.total_tiv_kes,
+        "total_rows": results.total_rows,
+        "eal_common_kes": results.eal_common_kes,
+        "eal_occasional_kes": results.eal_occasional_kes,
+        "eal_moderate_kes": results.eal_moderate_kes,
+        "eal_severe_kes": results.eal_severe_kes,
+        "eal_extreme_kes": results.eal_extreme_kes,
+        "eal_total_kes": results.eal_total_kes,
+        "exceedance_curve": results.exceedance_curve,
+        "top_locations": results.top_locations,
+    }
+    try:
+        report = explain_results(request.title or portfolio.name, results_dict)
+        actions = recommend_actions(portfolio.name, results_dict)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ReportResponse(report=report, actions=actions)
