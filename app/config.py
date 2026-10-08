@@ -12,7 +12,8 @@ class Settings(BaseSettings):
     brevo_sender_email: str | None = None
     brevo_sender_name: str = "Fusion Backend"
     jwt_secret: str | None = None
-    jwt_access_token_minutes: int = 60
+    jwt_access_token_minutes: int = 45       # refresh token handles longevity
+    jwt_refresh_token_days: int = 30         # how long a refresh token lives
     portfolio_upload_max_mb: int = 100
     portfolio_batch_size: int = 250
     portfolio_email_max_mb: int = 10

@@ -16,5 +16,17 @@ class UserRead(BaseModel):
 class AuthResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    expires_in: int
+    expires_in: int          # seconds until access token expires
+    refresh_token: str       # long-lived; store securely, never in localStorage
     user: UserRead
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    refresh_token: str       # rotated — old token is now invalid

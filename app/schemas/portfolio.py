@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +13,7 @@ class PortfolioRead(BaseModel):
     error: str | None
     total_rows: int
     dropped_rows: int
+    user_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -20,6 +22,59 @@ class PortfolioRead(BaseModel):
 
 class PortfolioUploadRead(PortfolioRead):
     access_token: str
+
+
+class ExceedanceCurvePoint(BaseModel):
+    return_period_years: int
+    annual_exceedance_probability: float
+    loss_kes: float
+
+
+class PortfolioResultsRead(BaseModel):
+    portfolio_id: str
+    total_tiv_kes: float
+    total_rows: int
+    eal_common_kes: float
+    eal_occasional_kes: float
+    eal_moderate_kes: float
+    eal_severe_kes: float
+    eal_extreme_kes: float
+    eal_total_kes: float
+    exceedance_curve: list[ExceedanceCurvePoint]
+    top_locations: list[dict[str, Any]]
+    computed_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ExplainRequest(BaseModel):
+    pass  # no body needed; results are fetched server-side
+
+
+class ExplainResponse(BaseModel):
+    explanation: str
+
+
+class ChatMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant)$")
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=20)
+
+
+class ChatResponse(BaseModel):
+    reply: str
+
+
+class ReportRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
+class ReportResponse(BaseModel):
+    report: str
+    actions: list[dict[str, Any]]
 
 
 class PortfolioEmailRequest(BaseModel):
