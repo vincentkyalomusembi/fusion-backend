@@ -1,24 +1,19 @@
 """Compute loss analytics from a confirmed portfolio's hazard predictions.
 
-Return-period tiers and their annualised rate assumptions
-(events per year, i.e. 1 / return_period_years):
-    common      1-in-5    → 0.200
-    occasional  1-in-20   → 0.050
-    moderate    1-in-50   → 0.020
-    severe      1-in-100  → 0.010
-    extreme     1-in-250  → 0.004
+Uses the real CAT pipeline (CAT_model.post_processing_pipeline) which applies
+JRC/Huizinga damage curves per construction class instead of a simple
+hazard_score × tiv approximation.
 
-Expected Annual Loss (EAL) per tier is approximated as:
-    EAL_tier = hazard_score_tier × tiv_kes × annual_rate
-
-The exceedance curve is built from the five tier loss totals ordered by
-return period (ascending probability of exceedance).
+Expected Annual Loss (EAL) per tier:
+    EAL_tier = sum(Loss_tier across all buildings) × annual_rate
+    where Loss = damage_ratio(housing_class, hazard_score) × tiv_kes
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
 
+import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -26,16 +21,27 @@ from sqlalchemy.orm import Session
 from app.database import engine
 from app.models.portfolio import Portfolio, PortfolioPreviewRecord, PortfolioResults
 from app.services.portfolio_etl import EXPOSURE_FIELDS, HAZARD_FIELDS, get_portfolio_table
+from CAT_model.post_processing_pipeline import RETURN_PERIOD_YEARS, build_losses, ep_curve
 
-# (tier_field, return_period_years, annual_rate)
-TIERS: list[tuple[str, int, float]] = [
-    ("hazard_score_common",     5,   0.200),
-    ("hazard_score_occasional", 20,  0.050),
-    ("hazard_score_moderate",   50,  0.020),
-    ("hazard_score_severe",     100, 0.010),
-    ("hazard_score_extreme",    250, 0.004),
-]
+# annual rate = 1 / return_period_years
+_ANNUAL_RATE = {tier: 1 / rp for tier, rp in RETURN_PERIOD_YEARS.items()}
 TOP_N = 10
+
+# Map from portfolio row field names → pipeline column names
+_FIELD_MAP = {
+    "loc_id": "Loc_id",
+    "lat": "Lat",
+    "lon": "Lon",
+    "housing_class": "Housing_class",
+    "floor_area_m2": "floor_area_m2",
+    "cost_per_m2_kes": "cost_per_m2_kes",
+    "tiv_kes": "TIV",
+    "hazard_score_common": "Hazard_score_common",
+    "hazard_score_occasional": "Hazard_score_occasional",
+    "hazard_score_moderate": "Hazard_score_moderate",
+    "hazard_score_severe": "Hazard_score_severe",
+    "hazard_score_extreme": "Hazard_score_extreme",
+}
 
 
 def _rows_from_confirmed(table_name: str) -> list[dict[str, Any]]:
@@ -55,6 +61,15 @@ def _rows_from_preview(portfolio_id: str, db: Session) -> list[dict[str, Any]]:
     return [row.record_data for row in staged]
 
 
+def _to_pipeline_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Rename portfolio row keys to the column names the CAT pipeline expects."""
+    df = pd.DataFrame(rows).rename(columns=_FIELD_MAP)
+    # Ensure numeric types
+    for col in ("Lat", "Lon", "floor_area_m2", "cost_per_m2_kes", "TIV"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def compute_and_store_results(portfolio: Portfolio, db: Session) -> PortfolioResults:
     rows = (
         _rows_from_confirmed(portfolio.table_name)
@@ -64,27 +79,31 @@ def compute_and_store_results(portfolio: Portfolio, db: Session) -> PortfolioRes
     if not rows:
         raise ValueError("No rows available to compute results")
 
-    total_tiv = 0.0
-    tier_losses: dict[str, float] = {field: 0.0 for field, _, _ in TIERS}
+    # ── Run the real CAT pipeline ────────────────────────────────────────────
+    scored_df = _to_pipeline_df(rows)
+    losses_df = build_losses(scored_df)          # one row per building per return period
+    curve_df = ep_curve(losses_df)               # aggregated EP curve
 
-    for row in rows:
-        tiv = float(row.get("tiv_kes") or 0)
-        total_tiv += tiv
-        for field, _, rate in TIERS:
-            score = float(row.get(field) or 0)
-            tier_losses[field] += score * tiv * rate
+    total_tiv = float(scored_df["TIV"].sum())
 
-    eal_total = sum(tier_losses.values())
+    # EAL per tier = total loss at that return period × annual rate
+    eal_by_tier: dict[str, float] = {}
+    for tier, rp in RETURN_PERIOD_YEARS.items():
+        tier_total = float(losses_df.loc[losses_df["Tier"] == tier, "Loss"].sum())
+        eal_by_tier[tier] = round(tier_total * _ANNUAL_RATE[tier], 2)
+    eal_total = round(sum(eal_by_tier.values()), 2)
 
-    exceedance_curve = []
-    for field, rp, rate in TIERS:
-        gross_loss = sum(float(row.get(field) or 0) * float(row.get("tiv_kes") or 0) for row in rows)
-        exceedance_curve.append({
-            "return_period_years": rp,
-            "annual_exceedance_probability": round(rate, 4),
-            "loss_kes": round(gross_loss, 2),
-        })
+    # Exceedance curve from the pipeline output
+    exceedance_curve = [
+        {
+            "return_period_years": int(row["ReturnPeriod"]),
+            "annual_exceedance_probability": round(float(row["ExceedanceProbability"]), 6),
+            "loss_kes": round(float(row["TotalLoss"]), 2),
+        }
+        for _, row in curve_df.iterrows()
+    ]
 
+    # Top 10 locations by (hazard_severity × tiv)
     top_locations = sorted(
         [
             {
@@ -105,12 +124,12 @@ def compute_and_store_results(portfolio: Portfolio, db: Session) -> PortfolioRes
         "portfolio_id": portfolio.id,
         "total_tiv_kes": round(total_tiv, 2),
         "total_rows": len(rows),
-        "eal_common_kes": round(tier_losses["hazard_score_common"], 2),
-        "eal_occasional_kes": round(tier_losses["hazard_score_occasional"], 2),
-        "eal_moderate_kes": round(tier_losses["hazard_score_moderate"], 2),
-        "eal_severe_kes": round(tier_losses["hazard_score_severe"], 2),
-        "eal_extreme_kes": round(tier_losses["hazard_score_extreme"], 2),
-        "eal_total_kes": round(eal_total, 2),
+        "eal_common_kes": eal_by_tier.get("common", 0.0),
+        "eal_occasional_kes": eal_by_tier.get("occasional", 0.0),
+        "eal_moderate_kes": eal_by_tier.get("moderate", 0.0),
+        "eal_severe_kes": eal_by_tier.get("severe", 0.0),
+        "eal_extreme_kes": eal_by_tier.get("extreme", 0.0),
+        "eal_total_kes": eal_total,
         "exceedance_curve": exceedance_curve,
         "top_locations": top_locations,
         "computed_at": datetime.now(timezone.utc),

@@ -77,6 +77,18 @@ class ReportResponse(BaseModel):
     actions: list[dict[str, Any]]
 
 
+class AnalysisResponse(BaseModel):
+    portfolio_id: str
+    results: PortfolioResultsRead
+    report: str
+    actions: list[dict[str, Any]]
+
+
+class AnalysisEmailRequest(BaseModel):
+    email: str = Field(pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    attach_csv: bool = False
+
+
 class PortfolioEmailRequest(BaseModel):
     email: str = Field(pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
