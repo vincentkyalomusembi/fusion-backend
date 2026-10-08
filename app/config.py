@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     frontend_url: str | None = None
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-3.8-flash"
-    gemini_extraction_model: str = "gemini-3.8-flash"
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_extraction_model: str = "gemini-2.5-flash"
     brevo_api_key: str | None = None
     brevo_sender_email: str | None = None
     brevo_sender_name: str = "Fusion Backend"
