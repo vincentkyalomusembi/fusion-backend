@@ -9,6 +9,7 @@ from app.database import Base
 from app.models import location  # noqa: F401
 from app.models import hotspot  # noqa: F401
 from app.models import portfolio  # noqa: F401
+from app.models import user  # noqa: F401
 
 load_dotenv()
 config = context.config
