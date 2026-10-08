@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     frontend_url: str | None = None
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-nano"
+    openai_extraction_model: str = "gpt-5.4-mini"
     brevo_api_key: str | None = None
     brevo_sender_email: str | None = None
     brevo_sender_name: str = "Fusion Backend"

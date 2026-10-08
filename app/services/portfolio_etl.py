@@ -233,6 +233,9 @@ def _line_chunks(lines: Iterable[str]) -> Iterable[str]:
         yield buffer
 
 
+_EXTRACT_BACKOFF = [5, 15, 30, 60]
+
+
 def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -245,13 +248,13 @@ def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
         "to numeric types where possible. Source text:\n"
     )
     response = None
-    for attempt in range(3):
+    for attempt in range(len(_EXTRACT_BACKOFF) + 1):
         try:
             response = httpx.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 json={
-                    "model": settings.openai_model,
+                    "model": settings.openai_extraction_model,
                     "temperature": 0,
                     "response_format": {"type": "json_object"},
                     "messages": [
@@ -263,12 +266,44 @@ def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
             )
             response.raise_for_status()
             break
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError):
-            if response is not None and response.status_code < 500 and response.status_code != 429:
+        except httpx.HTTPStatusError:
+            if response is None:
                 raise
-            if attempt == 2:
+            status = response.status_code
+            if status == 429:
+                # Inspect body to distinguish rate-limit from quota/billing errors
+                try:
+                    body = response.json()
+                    error_type = body.get("error", {}).get("type", "")
+                    error_code = body.get("error", {}).get("code", "")
+                    error_msg  = body.get("error", {}).get("message", "")
+                except Exception:
+                    error_type, error_code, error_msg = "", "", ""
+                logger.warning(
+                    "OpenAI 429 on attempt %d — type=%r code=%r message=%r",
+                    attempt, error_type, error_code, error_msg,
+                )
+                # Quota / billing exhausted — no point retrying
+                if error_type in ("insufficient_quota",) or error_code in ("insufficient_quota", "billing_hard_limit_reached"):
+                    raise RuntimeError(
+                        f"OpenAI quota exhausted (billing limit reached): {error_msg}"
+                    ) from None
+                # Genuine rate-limit — back off and retry
+                if attempt >= len(_EXTRACT_BACKOFF):
+                    raise
+                retry_after = response.headers.get("retry-after", "")
+                wait = float(retry_after) if retry_after.isdigit() else _EXTRACT_BACKOFF[attempt]
+                time.sleep(wait)
+            elif status >= 500:
+                if attempt >= len(_EXTRACT_BACKOFF):
+                    raise
+                time.sleep(_EXTRACT_BACKOFF[attempt])
+            else:
                 raise
-            time.sleep(2**attempt)
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if attempt >= len(_EXTRACT_BACKOFF):
+                raise
+            time.sleep(_EXTRACT_BACKOFF[attempt])
     if response is None:
         raise RuntimeError("OpenAI extraction did not return a response")
     content = response.json()["choices"][0]["message"]["content"]
