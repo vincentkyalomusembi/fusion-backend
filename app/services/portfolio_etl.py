@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import random
 import time
 import unicodedata
 import uuid
@@ -237,6 +238,13 @@ _EXTRACT_BACKOFF = [5, 15, 30, 60]
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
+def _gemini_headers() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "x-goog-api-key": settings.gemini_api_key or "",
+    }
+
+
 def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
     if not settings.gemini_api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -248,8 +256,8 @@ def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
         "unknown values; do not invent coordinates or financial values. Convert values "
         "to numeric types where possible. Source text:\n" + chunk
     )
-    url = f"{_GEMINI_BASE}/{settings.gemini_extraction_model}:generateContent?key={settings.gemini_api_key}"
-    body = {
+    url = f"{_GEMINI_BASE}/{settings.gemini_extraction_model}:generateContent"
+    payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
         "systemInstruction": {"parts": [{"text": "You extract structured property exposure records and return only valid JSON."}]},
@@ -257,7 +265,7 @@ def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
     response = None
     for attempt in range(len(_EXTRACT_BACKOFF) + 1):
         try:
-            response = httpx.post(url, json=body, timeout=httpx.Timeout(120.0, connect=15.0))
+            response = httpx.post(url, headers=_gemini_headers(), json=payload, timeout=httpx.Timeout(120.0, connect=15.0))
             response.raise_for_status()
             break
         except httpx.HTTPStatusError:
@@ -266,32 +274,29 @@ def _extract_chunk(chunk: str) -> list[dict[str, Any]]:
             status = response.status_code
             if status == 429:
                 try:
-                    body_json = response.json()
-                    error_msg = body_json.get("error", {}).get("message", "")
-                    error_status = body_json.get("error", {}).get("status", "")
+                    error = response.json().get("error", {})
+                    error_msg = error.get("message", "")
+                    error_status = error.get("status", "")
                 except Exception:
                     error_msg, error_status = "", ""
-                logger.warning(
-                    "Gemini 429 on attempt %d — status=%r message=%r",
-                    attempt, error_status, error_msg,
-                )
+                logger.warning("Gemini 429 attempt %d — status=%r message=%r", attempt, error_status, error_msg)
                 if error_status == "RESOURCE_EXHAUSTED" and "quota" in error_msg.lower():
                     raise RuntimeError(f"Gemini quota exhausted: {error_msg}") from None
                 if attempt >= len(_EXTRACT_BACKOFF):
                     raise
                 retry_after = response.headers.get("retry-after", "")
                 wait = float(retry_after) if retry_after.isdigit() else _EXTRACT_BACKOFF[attempt]
-                time.sleep(wait)
+                time.sleep(wait + random.uniform(0, 1))
             elif status in (500, 502, 503, 504):
                 if attempt >= len(_EXTRACT_BACKOFF):
                     raise
-                time.sleep(_EXTRACT_BACKOFF[attempt])
+                time.sleep(_EXTRACT_BACKOFF[attempt] + random.uniform(0, 1))
             else:
                 raise
         except (httpx.TimeoutException, httpx.NetworkError):
             if attempt >= len(_EXTRACT_BACKOFF):
                 raise
-            time.sleep(_EXTRACT_BACKOFF[attempt])
+            time.sleep(_EXTRACT_BACKOFF[attempt] + random.uniform(0, 1))
     if response is None:
         raise RuntimeError("Gemini extraction did not return a response")
     content = response.json()["candidates"][0]["content"]["parts"][0]["text"]
