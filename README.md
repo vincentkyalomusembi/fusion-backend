@@ -112,3 +112,25 @@
 ├── .gitignore
 ├── requirements.txt
 └── README.md
+
+## Flood hotspots
+
+Hotspots are stored as named areas with latitude and longitude. Apply the
+database migrations with `alembic upgrade head`, then import the bundled
+`data/nairobi_hotspots_geocoded.csv` using `python scripts/import_hotspots.py`.
+The importer updates coordinates when a hotspot name already exists.
+
+The API is available under `/api/v1/hotspots`:
+
+- `GET /api/v1/hotspots` lists hotspots (`limit` and `offset` are supported).
+- `POST /api/v1/hotspots/bulk` accepts a JSON array of `{ "name", "lat", "lon" }`
+  and creates or updates entries by name.
+
+Example upload body:
+
+```json
+[
+  {"name": "Kiambiu", "lat": -1.2822758, "lon": 36.8634101},
+  {"name": "Dandora", "lat": -1.2449083, "lon": 36.9060802}
+]
+```
