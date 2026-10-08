@@ -20,6 +20,8 @@ from app.database import get_db, engine
 from app.models.portfolio import Portfolio, PortfolioPreviewRecord, PortfolioResults
 from app.models.user import User
 from app.schemas.portfolio import (
+    AnalysisEmailRequest,
+    AnalysisResponse,
     ChatRequest,
     ChatResponse,
     ExplainResponse,
@@ -33,7 +35,7 @@ from app.schemas.portfolio import (
     ReportResponse,
 )
 from app.services.auth_service import JWT_ALGORITHM, bearer_scheme, get_current_user
-from app.services.brevo_service import send_portfolio_csv
+from app.services.brevo_service import send_analysis_report, send_portfolio_csv
 from app.services.llm.action_recommender import recommend_actions
 from app.services.llm.client import chat as llm_chat
 from app.services.llm.result_explainer import explain_results
@@ -556,3 +558,157 @@ def generate_report(
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ReportResponse(report=report, actions=actions)
+
+
+# ── Full CAT Analysis ─────────────────────────────────────────────────────────
+
+@router.post("/{portfolio_id}/analyse", response_model=AnalysisResponse)
+def analyse_portfolio(
+    portfolio_id: str,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> AnalysisResponse:
+    """
+    Run the full CAT pipeline and return results + LLM report + actions.
+
+    This is the 'Run Analysis' button endpoint. It:
+      1. Runs score_hazard() + build_losses() + ep_curve() via the real damage curves
+      2. Stores the results in portfolio_results (upsert)
+      3. Generates a plain-language LLM report
+      4. Returns recommended actions
+
+    Requires the portfolio to be in 'predicted' or 'confirmed' status.
+    """
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    if portfolio.status not in {"predicted", "confirmed", *PREDICTABLE_STATUSES}:
+        raise HTTPException(
+            status_code=409,
+            detail="Run hazard prediction before running the analysis",
+        )
+
+    # Step 1 + 2: compute losses via real CAT pipeline and cache
+    try:
+        results = compute_and_store_results(portfolio, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"CAT pipeline failed: {exc}") from exc
+
+    results_dict = {
+        "total_tiv_kes": results.total_tiv_kes,
+        "total_rows": results.total_rows,
+        "eal_common_kes": results.eal_common_kes,
+        "eal_occasional_kes": results.eal_occasional_kes,
+        "eal_moderate_kes": results.eal_moderate_kes,
+        "eal_severe_kes": results.eal_severe_kes,
+        "eal_extreme_kes": results.eal_extreme_kes,
+        "eal_total_kes": results.eal_total_kes,
+        "exceedance_curve": results.exceedance_curve,
+        "top_locations": results.top_locations,
+    }
+
+    # Step 3: LLM report + actions
+    try:
+        report = explain_results(portfolio.name, results_dict)
+        actions = recommend_actions(portfolio.name, results_dict)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    return AnalysisResponse(
+        portfolio_id=portfolio.id,
+        results=PortfolioResultsRead.model_validate(results),
+        report=report,
+        actions=actions,
+    )
+
+
+@router.post("/{portfolio_id}/analyse/email", response_model=PortfolioEmailResponse)
+def email_analysis_report(
+    portfolio_id: str,
+    request: AnalysisEmailRequest,
+    access_token: str = Header(alias="X-Portfolio-Token"),
+    db: Session = Depends(get_db),
+) -> PortfolioEmailResponse:
+    """
+    Email the full analysis report to a recipient.
+
+    Sends an HTML email containing the LLM narrative report and the
+    recommended actions table. Optionally attaches the portfolio CSV
+    when attach_csv=true (only available after the portfolio is confirmed).
+    """
+    portfolio = _get_portfolio(db, portfolio_id, access_token)
+    if portfolio.status not in {"predicted", "confirmed", *PREDICTABLE_STATUSES}:
+        raise HTTPException(
+            status_code=409,
+            detail="Run hazard prediction before emailing the analysis",
+        )
+
+    # Re-use or compute results
+    try:
+        results = _get_results_or_compute(portfolio, db)
+    except HTTPException:
+        raise
+
+    results_dict = {
+        "total_tiv_kes": results.total_tiv_kes,
+        "total_rows": results.total_rows,
+        "eal_common_kes": results.eal_common_kes,
+        "eal_occasional_kes": results.eal_occasional_kes,
+        "eal_moderate_kes": results.eal_moderate_kes,
+        "eal_severe_kes": results.eal_severe_kes,
+        "eal_extreme_kes": results.eal_extreme_kes,
+        "eal_total_kes": results.eal_total_kes,
+        "exceedance_curve": results.exceedance_curve,
+        "top_locations": results.top_locations,
+    }
+
+    try:
+        report = explain_results(portfolio.name, results_dict)
+        actions = recommend_actions(portfolio.name, results_dict)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    # Optional CSV attachment
+    csv_bytes: bytes | None = None
+    csv_filename: str | None = None
+    if request.attach_csv and portfolio.status == "confirmed" and engine is not None:
+        table = get_portfolio_table(portfolio.table_name)
+        fields = (*EXPOSURE_FIELDS, *HAZARD_FIELDS)
+        buf = io.BytesIO()
+        text_buf = io.TextIOWrapper(buf, encoding="utf-8", newline="", write_through=True)
+        writer = csv.writer(text_buf)
+        writer.writerow(fields)
+        max_bytes = max(1, settings.portfolio_email_max_mb) * 1024 * 1024
+        try:
+            with engine.connect() as connection:
+                result = connection.execution_options(stream_results=True).execute(
+                    select(*(table.c[f] for f in fields)).order_by(table.c.loc_id)
+                )
+                while rows := result.fetchmany(500):
+                    writer.writerows(rows)
+                    text_buf.flush()
+                    if buf.tell() > max_bytes:
+                        raise HTTPException(
+                            status_code=413,
+                            detail="CSV too large to attach; send without attach_csv=true",
+                        )
+            csv_bytes = buf.getvalue()
+            csv_filename = f"{portfolio.table_name}.csv"
+        finally:
+            text_buf.detach()
+
+    try:
+        message_id = send_analysis_report(
+            request.email,
+            portfolio.name,
+            report,
+            actions,
+            csv_bytes=csv_bytes,
+            csv_filename=csv_filename,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Brevo could not send the report email") from exc
+
+    return PortfolioEmailResponse(sent=True, message_id=message_id)
