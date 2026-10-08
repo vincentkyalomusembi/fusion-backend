@@ -134,3 +134,42 @@ Example upload body:
   {"name": "Dandora", "lat": -1.2449083, "lon": 36.9060802}
 ]
 ```
+
+## Portfolio exposure ETL
+
+Apply all database migrations with `alembic upgrade head`. Set `OPENAI_API_KEY`
+in the backend environment for PDF and DOCX extraction. CSV files are parsed
+directly. The API accepts `.csv`, text-based `.pdf`, and `.docx` uploads up to
+`PORTFOLIO_UPLOAD_MAX_MB` (100 MB by default). Scanned PDFs need OCR and are
+reported as a processing error when no text can be extracted.
+
+Before approval, extracted and predicted rows are held in temporary review
+storage keyed by portfolio ID. The portfolio-named final table is created and
+populated only after the user approves the preview. Each approved portfolio
+gets a separate physical table named from the sanitized portfolio name plus a
+unique suffix. The response includes a one-time `access_token`; keep it
+securely and send it as `X-Portfolio-Token` on every subsequent request. The
+server stores only its hash.
+
+1. `POST /api/v1/portfolios` with multipart form fields `name` and `file`.
+2. Poll `GET /api/v1/portfolios/{id}/status` until extraction finishes, sending
+   `X-Portfolio-Token: <access_token>`.
+3. Inspect and edit rows through `GET` and `PATCH /api/v1/portfolios/{id}/preview`,
+   sending the same token header.
+4. `POST /api/v1/portfolios/{id}/predict` runs the existing six-output
+   `random_forest_model/hazard_random_forest.joblib` pipeline.
+5. `POST /api/v1/portfolios/{id}/confirm` queues the final table write. Poll
+   status until it is `confirmed`, then download
+   `GET /api/v1/portfolios/{id}/export.csv`, sending the same token header.
+6. Optionally call `POST /api/v1/portfolios/{id}/email` with
+   `{ "email": "recipient@example.com" }` and the token header to send the
+   approved CSV using Brevo. Configure `BREVO_API_KEY` and
+   `BREVO_SENDER_EMAIL`; attachments above `PORTFOLIO_EMAIL_MAX_MB` are rejected.
+
+CSV parsing and database writes run in bounded batches. Incomplete, invalid,
+empty, and duplicate exposure rows are dropped and counted in the portfolio
+status. The trained model requires `lat`, `lon`, `housing_class`,
+`floor_area_m2`, `cost_per_m2_kes`, and `tiv_kes`; those values must be present
+before a record can be predicted.
+
+The users table and sign-up/sign-in endpoints are not part of this phase.
