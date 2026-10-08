@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routes.hotspots import router as hotspots_router
+from app.routes.auth import router as auth_router
 from app.routes.locations import router as locations_router
 from app.routes.portfolios import router as portfolios_router
 
@@ -15,6 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(locations_router, prefix=settings.api_v1_prefix)
+app.include_router(auth_router, prefix=settings.api_v1_prefix)
 app.include_router(hotspots_router, prefix=settings.api_v1_prefix)
 app.include_router(portfolios_router, prefix=settings.api_v1_prefix)
 

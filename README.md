@@ -172,4 +172,19 @@ status. The trained model requires `lat`, `lon`, `housing_class`,
 `floor_area_m2`, `cost_per_m2_kes`, and `tiv_kes`; those values must be present
 before a record can be predicted.
 
-The users table and sign-up/sign-in endpoints are not part of this phase.
+## Authentication
+
+Set `JWT_SECRET` in `.env` to a long random secret and optionally set
+`JWT_ACCESS_TOKEN_MINUTES` (defaults to 60). Apply the users migration with
+`alembic upgrade head`.
+
+- `POST /api/v1/auth/signup` accepts `{ "email", "password" }` and creates an
+  account with an Argon2 password hash.
+- `POST /api/v1/auth/signin` accepts the same fields and returns a signed JWT
+  access token.
+- `GET /api/v1/auth/me` validates `Authorization: Bearer <token>` and returns
+  the current account.
+
+Passwords are never stored in plaintext. The token is signed, not encrypted;
+do not place secrets in its claims. Existing portfolio routes continue to use
+their portfolio access token until portfolios are linked to user accounts.
