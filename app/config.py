@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     portfolio_upload_max_mb: int = 100
     portfolio_batch_size: int = 250
     portfolio_email_max_mb: int = 10
+    gemini_document_chunk_chars: int = 100_000
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

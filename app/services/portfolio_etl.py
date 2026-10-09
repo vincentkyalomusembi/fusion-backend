@@ -38,7 +38,6 @@ REQUIRED_FIELDS = (
     "lat", "lon", "housing_class", "floor_area_m2", "cost_per_m2_kes", "tiv_kes",
 )
 NUMERIC_FIELDS = ("lat", "lon", "floor_area_m2", "cost_per_m2_kes", "tiv_kes")
-CHUNK_CHAR_LIMIT = 12_000
 _tables: dict[str, Table] = {}
 
 
@@ -144,20 +143,21 @@ def normalize_row(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
 
 
 def _text_chunks(text: str) -> Iterable[str]:
+    chunk_limit = max(1_000, min(settings.gemini_document_chunk_chars, 500_000))
     buffer = ""
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        if len(buffer) + len(line) + 1 > CHUNK_CHAR_LIMIT and buffer:
+        if len(buffer) + len(line) + 1 > chunk_limit and buffer:
             yield buffer
             buffer = ""
-        while len(line) > CHUNK_CHAR_LIMIT:
+        while len(line) > chunk_limit:
             if buffer:
                 yield buffer
                 buffer = ""
-            yield line[:CHUNK_CHAR_LIMIT]
-            line = line[CHUNK_CHAR_LIMIT:]
+            yield line[:chunk_limit]
+            line = line[chunk_limit:]
         buffer = f"{buffer}\n{line}" if buffer else line
     if buffer:
         yield buffer
@@ -215,18 +215,19 @@ def _document_text_chunks(path: Path) -> Iterable[str]:
 
 
 def _line_chunks(lines: Iterable[str]) -> Iterable[str]:
+    chunk_limit = max(1_000, min(settings.gemini_document_chunk_chars, 500_000))
     buffer = ""
     for value in lines:
         line = value.strip()
         if not line:
             continue
-        while len(line) > CHUNK_CHAR_LIMIT:
+        while len(line) > chunk_limit:
             if buffer:
                 yield buffer
                 buffer = ""
-            yield line[:CHUNK_CHAR_LIMIT]
-            line = line[CHUNK_CHAR_LIMIT:]
-        if len(buffer) + len(line) + 1 > CHUNK_CHAR_LIMIT and buffer:
+            yield line[:chunk_limit]
+            line = line[chunk_limit:]
+        if len(buffer) + len(line) + 1 > chunk_limit and buffer:
             yield buffer
             buffer = ""
         buffer = f"{buffer}\n{line}" if buffer else line
