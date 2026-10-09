@@ -493,6 +493,9 @@ def explain_portfolio(
         "eal_total_kes": results.eal_total_kes,
         "exceedance_curve": results.exceedance_curve,
         "top_locations": results.top_locations,
+        "building_losses": results.building_losses,
+        "insurance_curve": results.insurance_curve,
+        "insurance_program": results.insurance_program,
     }
     try:
         explanation = explain_results(portfolio.name, results_dict)
@@ -551,6 +554,9 @@ def generate_report(
         "eal_total_kes": results.eal_total_kes,
         "exceedance_curve": results.exceedance_curve,
         "top_locations": results.top_locations,
+        "building_losses": results.building_losses,
+        "insurance_curve": results.insurance_curve,
+        "insurance_program": results.insurance_program,
     }
     try:
         report = explain_results(request.title or portfolio.name, results_dict)
@@ -605,6 +611,9 @@ def analyse_portfolio(
         "eal_total_kes": results.eal_total_kes,
         "exceedance_curve": results.exceedance_curve,
         "top_locations": results.top_locations,
+        "building_losses": results.building_losses,
+        "insurance_curve": results.insurance_curve,
+        "insurance_program": results.insurance_program,
     }
 
     # Step 3: LLM report + actions
@@ -660,6 +669,9 @@ def email_analysis_report(
         "eal_total_kes": results.eal_total_kes,
         "exceedance_curve": results.exceedance_curve,
         "top_locations": results.top_locations,
+        "building_losses": results.building_losses,
+        "insurance_curve": results.insurance_curve,
+        "insurance_program": results.insurance_program,
     }
 
     try:

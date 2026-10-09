@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     portfolio_batch_size: int = 250
     portfolio_email_max_mb: int = 10
     gemini_document_chunk_chars: int = 100_000
+    insurance_per_building_deductible_kes: float = 0.0
+    insurance_per_building_limit_kes: float = 1_000_000_000_000.0
+    insurance_quota_share: float = 1.0
+    catastrophe_excess_attachment_kes: float = 0.0
+    catastrophe_excess_limit_kes: float = 1_000_000_000_000.0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
