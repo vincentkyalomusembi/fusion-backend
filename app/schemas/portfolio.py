@@ -42,6 +42,9 @@ class PortfolioResultsRead(BaseModel):
     eal_total_kes: float
     exceedance_curve: list[ExceedanceCurvePoint]
     top_locations: list[dict[str, Any]]
+    building_losses: list[dict[str, Any]]
+    insurance_curve: list[dict[str, Any]]
+    insurance_program: dict[str, Any]
     computed_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

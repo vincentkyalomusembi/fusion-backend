@@ -44,6 +44,9 @@ class PortfolioResults(Base):
     eal_total_kes: Mapped[float] = mapped_column(Float, nullable=False)
     exceedance_curve: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
     top_locations: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    building_losses: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    insurance_curve: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    insurance_program: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
