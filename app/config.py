@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     frontend_url: str | None = None
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
-    gemini_extraction_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_extraction_model: str = "gemini-3.8-flash"
     brevo_api_key: str | None = None
     brevo_sender_email: str | None = None
     brevo_sender_name: str = "Fusion Backend"
@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     portfolio_upload_max_mb: int = 100
     portfolio_batch_size: int = 250
     portfolio_email_max_mb: int = 10
+    gemini_document_chunk_chars: int = 100_000
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
